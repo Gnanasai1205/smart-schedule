@@ -1,0 +1,10 @@
+version: "2"
+tunnels:
+  backend:
+    addr: 5000
+    proto: http
+    bind_tls: true
+  frontend:
+    addr: 5173
+    proto: http
+    bind_tls: true
