@@ -46,6 +46,8 @@ const corsOptions = {
     // Wildcard mode
     if (allowedOrigins.includes('*')) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
+    // Allow all vercel preview domains dynamically
+    if (origin.endsWith('.vercel.app')) return callback(null, true);
     callback(new Error(`CORS: origin ${origin} not allowed`));
   },
   credentials: true
