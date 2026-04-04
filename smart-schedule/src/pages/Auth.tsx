@@ -25,8 +25,14 @@ export default function Auth() {
     setSuccess("");
 
     try {
+      let deviceId = localStorage.getItem("deviceId");
+      if (!deviceId) {
+         deviceId = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36);
+         localStorage.setItem("deviceId", deviceId);
+      }
+
       const endpoint = isLogin ? "/api/auth/login" : "/api/auth/register";
-      const payload = isLogin ? { email, password } : { name, email, password };
+      const payload = isLogin ? { email, password, deviceId } : { name, email, password };
 
       const res = await fetch(`${API_BASE}${endpoint}`, {
         method: "POST",

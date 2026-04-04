@@ -23,8 +23,8 @@ const roles = [
     desc: "View class timetables and receive personalized AI study plans.",
     path: "/auth?role=student",
     gradient: "from-primary/30 to-secondary/10",
-    iconBg: "bg-primary/20",
-    textColor: "text-primary"
+    iconBg: "",
+    textColor: "text-foreground"
   },
   {
     key: "teacher",
@@ -33,8 +33,8 @@ const roles = [
     desc: "Generate dynamic QR codes for secure, instant attendance.",
     path: "/auth?role=teacher",
     gradient: "from-secondary/30 to-accent/10",
-    iconBg: "bg-secondary/20",
-    textColor: "text-secondary"
+    iconBg: "",
+    textColor: "text-foreground"
   },
   {
     key: "admin",
@@ -43,8 +43,8 @@ const roles = [
     desc: "Monitor campus metrics and engagement through live analytics.",
     path: "/auth?role=admin",
     gradient: "from-accent/30 to-primary/10",
-    iconBg: "bg-accent/20",
-    textColor: "text-accent"
+    iconBg: "",
+    textColor: "text-foreground"
   }
 ];
 
@@ -97,10 +97,7 @@ export default function Landing() {
           animate={{ opacity: 1, x: 0 }}
           className="flex items-center gap-3 cursor-pointer"
         >
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-secondary flex items-center justify-center shadow-lg shadow-primary/30">
-            <Zap className="h-5 w-5 text-white" />
-          </div>
-          <span className="font-display font-extrabold text-xl tracking-wide hidden sm:block bg-clip-text text-transparent bg-gradient-to-r from-primary to-secondary">
+          <span className="font-display font-extrabold text-xl tracking-wide">
             SmartCurriculum
           </span>
         </motion.div>
@@ -130,7 +127,7 @@ export default function Landing() {
             className="text-5xl sm:text-7xl md:text-8xl font-display font-black tracking-tighter leading-[1.05] mb-6 max-w-5xl"
           >
             The Future of <br className="hidden sm:block" />
-            <span className="bg-clip-text text-transparent bg-gradient-to-r from-primary via-secondary to-accent pb-2 drop-shadow-sm">
+            <span className="pb-2 drop-shadow-sm">
               Attendance & Planning
             </span>
           </motion.h1>
@@ -196,7 +193,7 @@ export default function Landing() {
                     <div className="h-4 w-48 bg-white/5 rounded" />
                   </div>
                   <div className="flex gap-2">
-                    <div className="h-8 w-8 rounded-full bg-primary/20 flex items-center justify-center">
+                    <div className="h-8 w-8 rounded-full flex items-center justify-center">
                       <LayoutDashboard className="w-4 h-4 text-primary" />
                     </div>
                   </div>
@@ -250,7 +247,7 @@ export default function Landing() {
                 transition={{ delay: i * 0.15 }}
                 className="group p-8 rounded-3xl glass-card bg-card/40 border-white/5 hover:border-primary/40 hover:bg-card/60 transition-all duration-300 transform hover:-translate-y-2"
               >
-                <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mb-6 shadow-inner group-hover:scale-110 group-hover:bg-primary/10 group-hover:border-primary/30 transition-all duration-500">
+                <div className="w-14 h-14 rounded-2xl border border-white/10 flex items-center justify-center mb-6 shadow-inner group-hover:scale-110 group-hover:border-primary/30 transition-all duration-500">
                   <f.icon className="w-7 h-7 text-foreground group-hover:text-primary transition-colors" />
                 </div>
                 <h3 className="text-xl font-bold mb-3">{f.label}</h3>

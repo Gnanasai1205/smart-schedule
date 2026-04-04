@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const Attendance = require('../models/Attendance');
 const Class = require('../models/Class');
 const Timetable = require('../models/Timetable');
+const Session = require('../models/Session');
 
 // @desc    Teacher generates QR code data
 // @route   POST /attendance/generate-qr
@@ -16,10 +17,12 @@ const generateQR = async (req, res) => {
       return res.status(403).json({ message: 'Not authorized for this class' });
     }
 
-    // Generate a short-lived JWT token specifically for the QR code
-    // Expiry is 15 seconds for dynamic rotating QR anti-cheat
+    const activeSession = await Session.findOne({ class: classId, isActive: true });
+
+    // Generate a long-lived JWT token for the session's QR code
     const qrData = {
       classId,
+      sessionId: activeSession ? activeSession._id : null,
       teacherId: req.user._id,
       teacherIP: req.ip || req.connection?.remoteAddress,
       teacherLat: latitude,
@@ -27,12 +30,12 @@ const generateQR = async (req, res) => {
       timestamp: Date.now(),
     };
 
-    const qrToken = jwt.sign(qrData, process.env.JWT_SECRET, { expiresIn: '15s' });
+    const qrToken = jwt.sign(qrData, process.env.JWT_SECRET, { expiresIn: '12h' });
 
     res.json({
       success: true,
       qrToken,
-      expiresIn: 15,
+      expiresIn: 43200,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -50,9 +53,17 @@ const markAttendance = async (req, res) => {
     const decoded = jwt.verify(qrToken, process.env.JWT_SECRET);
     
     // 2. Check if student already marked attendance for this class today
-    const { classId } = decoded;
-    
-    // Create start and end of day constraints
+    const { classId, sessionId } = decoded;
+
+    if (!sessionId) {
+      return res.status(400).json({ message: 'No active session found in QR code. Teacher needs to start the session.' });
+    }
+
+    const session = await Session.findById(sessionId);
+    if (!session || !session.isActive) {
+      return res.status(400).json({ message: 'Session is no longer active.' });
+    }
+
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
     const endOfDay = new Date();
@@ -61,10 +72,10 @@ const markAttendance = async (req, res) => {
     const existingAttendance = await Attendance.findOne({
       student: req.user._id,
       class: classId,
-      date: { $gte: startOfDay, $lte: endOfDay }
+      session: sessionId
     });
 
-    if (existingAttendance) {
+    if (existingAttendance && existingAttendance.status === 'Present') {
       return res.status(400).json({ message: 'Attendance already marked for today' });
     }
 
@@ -115,13 +126,24 @@ const markAttendance = async (req, res) => {
     // --- END ANTI-CHEAT CHECKS ---
 
     // 3. Save attendance
-    const attendance = await Attendance.create({
-      student: req.user._id,
-      class: classId,
-      status: 'Present',
-      method: 'QR',
-      qrTokenId: qrToken // Using entire token or could use jti inside JWT
-    });
+    let attendance;
+    if (existingAttendance) {
+      existingAttendance.status = 'Present';
+      existingAttendance.method = 'QR';
+      existingAttendance.qrTokenId = qrToken;
+      existingAttendance.date = new Date();
+      await existingAttendance.save();
+      attendance = existingAttendance;
+    } else {
+      attendance = await Attendance.create({
+        student: req.user._id,
+        class: classId,
+        session: sessionId,
+        status: 'Present',
+        method: 'QR',
+        qrTokenId: qrToken
+      });
+    }
 
     // 4. Emit socket event
     const io = req.app.get('io');
@@ -288,11 +310,135 @@ const getLiveAttendance = async (req, res) => {
   }
 };
 
+// @desc    Start an attendance session
+// @route   POST /attendance/start-session
+// @access  Private (Teacher)
+const startSession = async (req, res) => {
+  const { classId, subject, endTimeStr } = req.body;
+  if (!classId) return res.status(400).json({ message: 'classId is required' });
+
+  try {
+    const classInfo = await Class.findById(classId).populate('students');
+    if (!classInfo || classInfo.teacher.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized for this class' });
+    }
+
+    const existingSession = await Session.findOne({ class: classId, isActive: true });
+    if (existingSession) {
+      return res.status(400).json({ message: 'Session already active for this class' });
+    }
+
+    let endTime = null;
+    if (endTimeStr) {
+      // Parse "09:00" or "09:00 AM" or "14:30" for today
+      const cleaned = endTimeStr.replace(/\s*(AM|PM)/i, '').trim();
+      const [h, m] = cleaned.split(':').map(Number);
+      const isPM = /PM/i.test(endTimeStr);
+      let hours = h || 0;
+      if (isPM && hours < 12) hours += 12;
+      if (!isPM && hours === 12) hours = 0;
+      
+      const now = new Date();
+      endTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, m || 0, 0);
+    }
+
+    const session = await Session.create({
+      class: classId,
+      teacher: req.user._id,
+      subject: subject || classInfo.name,
+      isActive: true,
+      startTime: new Date(),
+      endTime
+    });
+
+    let studentsToMark = [];
+    if (classInfo.students && classInfo.students.length > 0) {
+      studentsToMark = classInfo.students;
+    } else {
+      const User = require('../models/User');
+      const allStudents = await User.find({ role: 'Student' }).select('_id');
+      studentsToMark = allStudents;
+    }
+
+    const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
+    const endOfDay = new Date(); endOfDay.setHours(23,59,59,999);
+
+    const attendanceRecords = studentsToMark.map(student => ({
+      student: student._id || student,
+      class: classId,
+      session: session._id,
+      status: 'Absent',
+      method: 'Manual',
+      date: new Date()
+    }));
+
+    if (attendanceRecords.length > 0) {
+      // Avoid inserting duplicates if already inserted manually for some reason, 
+      // but session is new so it should be fine. Ignore errors for unique duplicates.
+      try {
+        await Attendance.insertMany(attendanceRecords, { ordered: false });
+      } catch (err) {
+        // Ignored if duplicate
+      }
+    }
+
+    const io = req.app.get('io');
+    io.to(`class_${classId}`).emit('sessionStarted', { sessionId: session._id, classId });
+    io.emit('sessionStarted', { classId, sessionId: session._id }); 
+
+    res.status(201).json({ success: true, session, totalStudents: studentsToMark.length });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    End an attendance session
+// @route   POST /attendance/end-session
+// @access  Private (Teacher)
+const endSession = async (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) return res.status(400).json({ message: 'sessionId is required' });
+
+  try {
+    const session = await Session.findById(sessionId);
+    if (!session || session.teacher.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized or session missing' });
+    }
+
+    session.isActive = false;
+    session.endTime = new Date();
+    await session.save();
+
+    const io = req.app.get('io');
+    io.to(`class_${session.class}`).emit('sessionEnded', { sessionId, classId: session.class });
+    io.emit('sessionEnded', { classId: session.class });
+
+    res.json({ success: true, session });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc   Get active session for a class
+// @route  GET /attendance/session/:classId
+// @access Private
+const getActiveSession = async (req, res) => {
+  try {
+    const session = await Session.findOne({ class: req.params.classId, isActive: true });
+    res.json({ success: true, session });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   generateQR,
   markAttendance,
   getMyAttendance,
   getClassAttendance,
   getCurrentClass,
-  getLiveAttendance
+  getLiveAttendance,
+  startSession,
+  endSession,
+  getActiveSession
 };

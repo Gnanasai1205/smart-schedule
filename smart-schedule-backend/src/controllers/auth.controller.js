@@ -77,7 +77,7 @@ const loginUser = async (req, res) => {
     return res.status(400).json({ errors: errors.array() });
   }
 
-  const { email, password } = req.body;
+  const { email, password, deviceId } = req.body;
 
   try {
     const user = await User.findOne({ email }).select('+password');
@@ -91,11 +91,28 @@ const loginUser = async (req, res) => {
         return res.status(403).json({ message: 'Your account was rejected by the admin' });
       }
 
+      // Device Binding Logic
+      if (!deviceId) {
+        return res.status(400).json({ message: 'Device verification failed: Device ID is required for secure login.' });
+      }
+
+      if (!user.deviceId) {
+        // First login -> Bind this device (use targeted update to avoid enum validation issues)
+        await User.findByIdAndUpdate(user._id, { deviceId });
+        user.deviceId = deviceId;
+      } else if (user.deviceId !== deviceId) {
+        // Different device -> Blocked
+        return res.status(403).json({ 
+          message: 'Access Denied: Your account is bound to another device. Please use your primary device.' 
+        });
+      }
+
       sendTokenResponse(user, 200, res);
     } else {
       res.status(401).json({ message: 'Invalid email or password' });
     }
   } catch (error) {
+    console.error('LOGIN ERROR:', error.name, error.message, error.stack);
     res.status(500).json({ message: error.message });
   }
 };

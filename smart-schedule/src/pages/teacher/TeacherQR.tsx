@@ -22,12 +22,12 @@ interface TimetableSlot {
 
 interface AttendanceRecord {
   _id: string;
-  student: { name: string; email: string };
+  student: { _id?: string; name: string; email: string };
+  status: string;
   createdAt: string;
 }
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const QR_DURATION = 15;
 
 function timeToMinutes(t: string) {
   if (!t) return 0;
@@ -66,9 +66,11 @@ export default function TeacherQR() {
   // QR state
   const [qrToken, setQrToken] = useState<string | null>(null);
   const [classId, setClassId] = useState<string | null>(null);
-  const [timeLeft, setTimeLeft] = useState(QR_DURATION);
-  const [isExpired, setIsExpired] = useState(false);
   const [generatingQR, setGeneratingQR] = useState(false);
+  
+  // Session
+  const [isSessionActive, setIsSessionActive] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
   // Attendance
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
@@ -119,10 +121,9 @@ export default function TeacherQR() {
   }, [allSlots, currentDay, currentMinutes]);
 
   // Generate QR for a slot
-  const generateQR = async (slot: TimetableSlot) => {
+  const generateQR = async (slot: TimetableSlot, explicitClassId?: string) => {
     setGeneratingQR(true);
     setQrToken(null);
-    setRecords([]);
 
     // Capture Teacher Location Anti-Cheat
     let latitude;
@@ -140,13 +141,14 @@ export default function TeacherQR() {
     }
 
     try {
-      // First get/create classId from backend
-      const ccRes = await fetch(`${API_BASE}/api/attendance/current-class`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const ccData = await ccRes.json();
-
-      let resolvedClassId = ccData.currentClass?.classId;
+      let resolvedClassId = explicitClassId || classId;
+      if (!resolvedClassId) {
+        const ccRes = await fetch(`${API_BASE}/api/attendance/current-class`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const ccData = await ccRes.json();
+        resolvedClassId = ccData.currentClass?.classId;
+      }
 
       const qrRes = await fetch(`${API_BASE}/api/attendance/generate-qr`, {
         method: "POST",
@@ -162,16 +164,68 @@ export default function TeacherQR() {
       const qrData = await qrRes.json();
       if (qrRes.ok) {
         setQrToken(qrData.qrToken);
-        setClassId(qrData.classId || resolvedClassId);
-        setTimeLeft(QR_DURATION);
-        setIsExpired(false);
+        setClassId(resolvedClassId);
         setSelectedSlot(slot);
+        if (!isSessionActive && qrData.sessionId) {
+            setIsSessionActive(true);
+            setSessionId(qrData.sessionId);
+        }
         toast.success(`QR generated for "${slot.subject}"`);
       } else {
         toast.error(qrData.message || "Failed to generate QR");
       }
     } catch { toast.error("Network error"); }
     finally { setGeneratingQR(false); }
+  };
+
+  const executeStartSession = async (slot: TimetableSlot) => {
+    setGeneratingQR(true);
+    try {
+      const ccRes = await fetch(`${API_BASE}/api/attendance/current-class`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const ccData = await ccRes.json();
+      const resolvedClassId = ccData.currentClass?.classId;
+      setClassId(resolvedClassId);
+
+      const res = await fetch(`${API_BASE}/api/attendance/start-session`, {
+        method: 'POST',
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ 
+           classId: resolvedClassId, 
+           subject: slot.subject,
+           endTimeStr: slot.time.split(/[-–]/)[1]?.trim()
+        })
+      });
+      const data = await res.json();
+      
+      if (res.ok || data.message === 'Session already active for this class') {
+        setIsSessionActive(true);
+        if (data.session) setSessionId(data.session._id);
+        toast.success('Session Active!');
+        generateQR(slot, resolvedClassId);
+      } else {
+        toast.error(data.message || 'Failed to start session');
+      }
+    } catch { toast.error("Network error"); }
+    finally { setGeneratingQR(false); }
+  };
+
+  const executeEndSession = async () => {
+    if (!sessionId) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/attendance/end-session`, {
+        method: 'POST',
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ sessionId })
+      });
+      if (res.ok) {
+        setIsSessionActive(false);
+        setSessionId(null);
+        setQrToken(null);
+        toast.success('Session ended');
+      }
+    } catch { toast.error("Error ending session"); }
   };
 
   // Socket.io for live attendance
@@ -188,37 +242,23 @@ export default function TeacherQR() {
       headers: { Authorization: `Bearer ${token}` }
     }).then(r => r.json()).then(d => { if (d.records) setRecords(d.records); });
 
-    socket.on("attendanceMarked", (data: { studentName: string }) => {
-      setRecords(prev => [{
-        _id: Date.now().toString(),
-        student: { name: data.studentName, email: "" },
-        createdAt: new Date().toISOString()
-      }, ...prev]);
+    socket.on("attendanceMarked", (data: { studentName: string, studentId: string, status: string }) => {
+      setRecords(prev => {
+        const exists = prev.find(p => p.student.name === data.studentName || p.student._id === data.studentId);
+        if (exists) {
+          return prev.map(p => p === exists ? { ...p, status: "Present" } : p);
+        }
+        return [{
+          _id: Date.now().toString(),
+          student: { name: data.studentName, email: "" },
+          status: "Present",
+          createdAt: new Date().toISOString()
+        }, ...prev];
+      });
       toast.success(`✅ ${data.studentName} marked attendance!`);
     });
     return () => { socket.disconnect(); setConnected(false); };
   }, [classId, token]);
-
-  // QR countdown (Auto-looping Anti-cheat mechanics)
-  useEffect(() => {
-    if (!qrToken || isExpired || timeLeft <= 0) {
-      if (timeLeft <= 0 && qrToken && !isExpired) {
-        setIsExpired(true);
-        // Force an automatic recursive regeneration so the student scan time is minimized seamlessly!
-        if (selectedSlot) {
-          generateQR(selectedSlot);
-        }
-      }
-      return;
-    }
-    const t = setTimeout(() => setTimeLeft(p => p - 1), 1000);
-    return () => clearTimeout(t);
-  }, [qrToken, timeLeft, isExpired, selectedSlot]);
-
-  const progress = (timeLeft / QR_DURATION) * 100;
-  const radius = 110;
-  const circumference = 2 * Math.PI * radius;
-  const strokeDashoffset = circumference - (progress / 100) * circumference;
 
   const statusColors = {
     active: "border-success text-success bg-success/10",
@@ -293,15 +333,26 @@ export default function TeacherQR() {
                         )}
                       </div>
                     </div>
-                    {isSelected && status !== "past" && (
+                    {isSelected && status !== "past" && !isSessionActive && (
+                      <Button
+                        size="sm"
+                        disabled={generatingQR}
+                        onClick={(e) => { e.stopPropagation(); executeStartSession(slot); }}
+                        className="w-full mt-3 bg-primary hover:bg-primary/90 shadow-lg shadow-primary/20 gap-1.5 text-xs h-8"
+                      >
+                        {generatingQR ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                        Start Session
+                      </Button>
+                    )}
+                    {isSelected && status !== "past" && isSessionActive && (
                       <Button
                         size="sm"
                         disabled={generatingQR}
                         onClick={(e) => { e.stopPropagation(); generateQR(slot); }}
-                        className="w-full mt-3 bg-primary hover:bg-primary/90 shadow-lg shadow-primary/20 gap-1.5 text-xs h-8"
+                        className="w-full mt-3 bg-secondary hover:bg-secondary/90 shadow-lg shadow-secondary/20 gap-1.5 text-xs h-8"
                       >
-                        {generatingQR ? <Loader2 className="w-3 h-3 animate-spin" /> : <QrCode className="w-3 h-3" />}
-                        Generate QR
+                        <RefreshCw className="w-3 h-3" />
+                        Next QR
                       </Button>
                     )}
                   </motion.button>
@@ -345,73 +396,48 @@ export default function TeacherQR() {
           {/* QR + Ring */}
           {selectedSlot && (
             <>
-              {!qrToken ? (
+              {!qrToken || !isSessionActive ? (
                 <div className="z-10 flex flex-col items-center gap-5">
                   <div className="w-52 h-52 rounded-2xl border-2 border-dashed border-white/15 flex flex-col items-center justify-center gap-3 bg-white/2">
                     <QrCode className="w-16 h-16 text-muted-foreground opacity-20" />
-                    <p className="text-xs text-muted-foreground opacity-50 text-center px-4">Click "Generate QR" in the schedule panel or below</p>
+                    <p className="text-xs text-muted-foreground opacity-50 text-center px-4">Click "Start Session" in the schedule panel or below</p>
                   </div>
-                  <Button
-                    onClick={() => generateQR(selectedSlot)}
-                    disabled={generatingQR}
-                    size="lg"
-                    className="bg-primary hover:bg-primary/90 shadow-xl shadow-primary/30 gap-2"
-                  >
-                    {generatingQR ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" />}
-                    Generate QR for {selectedSlot.subject}
-                  </Button>
+                  {!isSessionActive ? (
+                    <Button
+                      onClick={() => executeStartSession(selectedSlot)}
+                      disabled={generatingQR}
+                      size="lg"
+                      className="bg-primary hover:bg-primary/90 shadow-xl shadow-primary/30 gap-2"
+                    >
+                      {generatingQR ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" />}
+                      Start Attendance Session
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={() => generateQR(selectedSlot)}
+                      disabled={generatingQR}
+                      size="lg"
+                      className="bg-primary hover:bg-primary/90 shadow-xl shadow-primary/30 gap-2"
+                    >
+                      {generatingQR ? <Loader2 className="w-5 h-5 animate-spin" /> : <RefreshCw className="w-5 h-5" />}
+                      Generate QR
+                    </Button>
+                  )}
                 </div>
               ) : (
-                <>
-                  <div className="relative flex items-center justify-center z-10 w-72 h-72">
-                    <svg className="absolute inset-0 w-full h-full -rotate-90">
-                      <circle cx="144" cy="144" r={radius} className="stroke-muted/20" strokeWidth="7" fill="none" />
-                      <circle
-                        cx="144" cy="144" r={radius}
-                        className={`transition-all duration-1000 ease-linear ${isExpired ? "stroke-destructive" : "stroke-primary"}`}
-                        strokeWidth="7" fill="none"
-                        strokeDasharray={circumference}
-                        strokeDashoffset={strokeDashoffset}
-                        strokeLinecap="round"
-                        filter="url(#glow)"
-                      />
-                      <defs>
-                        <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
-                          <feGaussianBlur stdDeviation="3" result="blur" />
-                          <feComposite in="SourceGraphic" in2="blur" operator="over" />
-                        </filter>
-                      </defs>
-                    </svg>
-
-                    <div className={`p-3 bg-white rounded-2xl shadow-2xl relative transition-all duration-500 ${isExpired ? "opacity-20 blur-sm scale-95" : "opacity-100 scale-100"}`}>
-                      <QRCodeSVG value={qrToken} size={168} level="Q" includeMargin={false} />
+                <div className="flex flex-col items-center gap-6 z-10">
+                  <div className="relative flex items-center justify-center w-72 h-72">
+                    <div className="p-4 bg-white rounded-2xl shadow-[0_0_40px_rgba(0,255,255,0.15)] ring-4 ring-primary/20">
+                      <QRCodeSVG value={qrToken} size={220} level="Q" includeMargin={false} />
                     </div>
-
-                    {isExpired && (
-                      <div className="absolute inset-0 flex flex-col items-center justify-center z-20">
-                        <XCircle className="w-14 h-14 text-destructive mb-2 drop-shadow-[0_0_15px_rgba(255,0,0,0.8)]" />
-                        <h3 className="text-xl font-bold text-destructive tracking-widest uppercase">Expired</h3>
-                      </div>
-                    )}
                   </div>
 
-                  <div className="mt-4 text-center z-10">
-                    <div className={`font-mono text-4xl font-bold tracking-tight ${timeLeft <= 10 && !isExpired ? "text-destructive animate-pulse" : "text-foreground"}`}>
-                      00:{timeLeft.toString().padStart(2, "0")}
-                    </div>
-                    <p className="text-muted-foreground text-xs mt-1 uppercase tracking-widest">Seconds Remaining</p>
-                  </div>
-
-                  {isExpired && (
-                    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mt-5 z-10">
-                      <Button onClick={() => generateQR(selectedSlot!)} disabled={generatingQR} size="lg"
-                        className="bg-primary hover:bg-primary/80 shadow-[0_0_20px_rgba(0,255,255,0.4)] gap-2">
-                        {generatingQR ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                        New QR Code
-                      </Button>
-                    </motion.div>
+                  {isSessionActive && (
+                    <Button onClick={executeEndSession} variant="destructive" size="lg" className="shadow-lg hover:shadow-xl transition-all">
+                       End Session
+                    </Button>
                   )}
-                </>
+                </div>
               )}
             </>
           )}
@@ -438,7 +464,7 @@ export default function TeacherQR() {
                   </div>
                 )}
                 <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30">
-                  {records.length} Present
+                  {records.filter(r => r.status === 'Present').length} Present / {records.length} Total
                 </Badge>
               </div>
             </div>
@@ -471,11 +497,18 @@ export default function TeacherQR() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="font-medium text-sm truncate">{r.student.name}</p>
-                      <p className="text-xs font-mono text-muted-foreground">
-                        {new Date(r.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                      <p className="text-xs font-mono text-muted-foreground flex gap-2">
+                        <span>{new Date(r.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                        <span className={r.status === 'Present' ? 'text-success' : 'text-destructive'}>
+                          {r.status}
+                        </span>
                       </p>
                     </div>
-                    <ShieldCheck className="w-4 h-4 text-success shrink-0" />
+                    {r.status === 'Present' ? (
+                       <ShieldCheck className="w-4 h-4 text-success shrink-0" />
+                    ) : (
+                       <XCircle className="w-4 h-4 text-destructive shrink-0" />
+                    )}
                   </motion.div>
                 ))
               )}

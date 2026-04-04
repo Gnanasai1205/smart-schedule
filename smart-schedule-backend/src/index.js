@@ -107,6 +107,10 @@ app.get('/', (req, res) => {
 app.use(notFound);
 app.use(errorHandler);
 
+// Initialize Cron Jobs
+const initCronJobs = require('./utils/cron');
+initCronJobs(io);
+
 // Connect to Database and start server
 const PORT = process.env.PORT || 5000;
 

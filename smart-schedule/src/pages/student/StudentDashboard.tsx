@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { useEffect, useState } from "react";
 import { QRScannerModal } from "@/components/QRScannerModal";
+import { io } from "socket.io-client";
 
 interface AttendanceRecord {
   _id: string;
@@ -37,6 +38,18 @@ export default function StudentDashboard() {
 
   useEffect(() => {
     fetchAttendance();
+
+    const socket = io(API_BASE);
+    socket.on("sessionStarted", () => {
+      fetchAttendance();
+    });
+    socket.on("attendanceMarked", (data: any) => {
+      if (data.studentId === user._id) {
+         fetchAttendance();
+      }
+    });
+
+    return () => { socket.disconnect(); };
   }, []);
 
   // Re-fetch after scanner closes (to show new record)
